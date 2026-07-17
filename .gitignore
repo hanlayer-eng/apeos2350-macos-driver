@@ -1,0 +1,12 @@
+# Compiled binary (built from source by install.sh)
+apeos2350-meta
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
