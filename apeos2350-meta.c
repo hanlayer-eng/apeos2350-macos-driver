@@ -67,9 +67,23 @@ static void parse_options(const char *opts,
     char *token   = strtok_r(buf, " ", &saveptr);
 
     while (token) {
-        /* Duplex */
+        /* Duplex (PPD option) */
         if (strncmp(token, "Duplex=", 7) == 0) {
             const char *val = token + 7;
+            if      (strcmp(val, "LongEdge")  == 0) *duplex = 2;
+            else if (strcmp(val, "ShortEdge") == 0) *duplex = 3;
+            else                                     *duplex = 1;
+        }
+        /* sides (IPP attribute — macOS applications often use this) */
+        else if (strncmp(token, "sides=", 6) == 0) {
+            const char *val = token + 6;
+            if      (strcmp(val, "two-sided-long-edge")  == 0) *duplex = 2;
+            else if (strcmp(val, "two-sided-short-edge") == 0) *duplex = 3;
+            else if (strcmp(val, "one-sided")            == 0) *duplex = 1;
+        }
+        /* cupsDuplex (another variant) */
+        else if (strncmp(token, "cupsDuplex=", 11) == 0) {
+            const char *val = token + 11;
             if      (strcmp(val, "LongEdge")  == 0) *duplex = 2;
             else if (strcmp(val, "ShortEdge") == 0) *duplex = 3;
             else                                     *duplex = 1;
@@ -142,8 +156,14 @@ int main(int argc, char *argv[])
 
     /* options from argv[5] */
     if (argc > 5 && argv[5]) {
+        fprintf(stderr, "apeos2350-meta: argv[5] options = \"%s\"\n", argv[5]);
         parse_options(argv[5], &duplex, &copies, paper, res, &source);
+    } else {
+        fprintf(stderr, "apeos2350-meta: no options (argv[5] missing)\n");
     }
+
+    fprintf(stderr, "apeos2350-meta: duplex=%d paper=%s res=%s copies=%d source=%d\n",
+            duplex, paper, res, copies, source);
 
     /* ── Output metadata header ─────────────────────────────── */
     int pcode = paper_code(paper);

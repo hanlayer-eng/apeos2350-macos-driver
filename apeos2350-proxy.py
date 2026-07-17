@@ -32,6 +32,7 @@ import argparse
 import signal
 import logging
 import re
+import time
 
 # ── Configuration ──────────────────────────────────────────────
 
@@ -609,9 +610,12 @@ def merge_duplex_job(hbpl2_pages, duplex):
       [ESC PS< + page data + ESC PE<]     ← page data (one per page)
       [UEL + PJL EOJ]
 
-    For duplex printing, all pages must be in a SINGLE PJL job with
-    a SINGLE job-start marker so the printer's hardware duplexer
-    prints front+back on the same sheet.
+    For ALL multi-page jobs (simplex and duplex), pages must be in a
+    SINGLE PJL job with a SINGLE job-start marker.  Sending multiple
+    separate PJL jobs in rapid succession overwhelms the printer.
+
+    For duplex printing, the PJL header is also fixed to DUPLEX=ON
+    so the printer's hardware duplexer prints front+back on one sheet.
 
     Merge strategy:
       Page 1:  [Fixed PJL header] + [ESC JP< + job meta] + [ESC PS< ... ESC PE< + trailer]
@@ -665,19 +669,21 @@ def merge_duplex_job(hbpl2_pages, duplex):
 def send_to_printer(hbpl2_pages, host, port, duplex=DEFAULT_DUPLEX):
     """Send HBPL-II page buffers to printer via raw TCP socket.
 
-    For simplex (duplex=1): each page is sent in a separate TCP
-    connection, matching the original behavior.
-
     For duplex (duplex=2 or 3): all pages are merged into a single
-    PJL job (with DUPLEX=ON in the header) and sent in a single
-    TCP connection so the printer's hardware duplexer is engaged.
+    PJL job and sent in one TCP connection (hardware duplexer needs
+    all pages in one job).
+
+    For simplex (duplex=1): each page is sent in a separate TCP
+    connection with its own complete PJL job.  A delay between pages
+    prevents overwhelming the printer.  This is the approach that was
+    verified working.
     """
     if duplex > 1 and len(hbpl2_pages) > 1:
         # Duplex: merge pages into single PJL job with correct DUPLEX setting
         merged_data = merge_duplex_job(hbpl2_pages, duplex)
-        log.info(f"Duplex mode: merged {len(hbpl2_pages)} pages into "
-                 f"single PJL job ({len(merged_data)}B), "
-                 f"{'LONGEDGE' if duplex == 2 else 'SHORTEDGE'}")
+        mode_name = "LONGEDGE" if duplex == 2 else "SHORTEDGE"
+        log.info(f"{mode_name}: merged {len(hbpl2_pages)} pages into "
+                 f"single PJL job ({len(merged_data)}B)")
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -690,36 +696,29 @@ def send_to_printer(hbpl2_pages, host, port, duplex=DEFAULT_DUPLEX):
         except Exception as e:
             log.error(f"Failed duplex send to printer: {e}")
             return False
-    elif duplex > 1 and len(hbpl2_pages) == 1:
-        # Single page duplex: just fix the PJL header
-        fixed = fix_pjl_duplex(hbpl2_pages[0], duplex)
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)
-            sock.connect((host, port))
-            sock.sendall(fixed)
-            sock.close()
-            log.info(f"Single-page duplex sent: {len(fixed)}B to {host}:{port}")
-            return True
-        except Exception as e:
-            log.error(f"Failed to send page to printer: {e}")
-            return False
     else:
-        # Simplex: send each page in separate connection (original behavior)
+        # Simplex (or single-page duplex): send each page in separate
+        # TCP connection.  A delay between pages prevents overwhelming
+        # the printer.
         total_sent = 0
         for i, page_data in enumerate(hbpl2_pages):
+            fixed = fix_pjl_duplex(page_data, duplex)
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(10)
+                sock.settimeout(30)
                 sock.connect((host, port))
-                sock.sendall(page_data)
+                sock.sendall(fixed)
                 sock.close()
-                total_sent += len(page_data)
+                total_sent += len(fixed)
                 log.info(f"Sent page {i+1}/{len(hbpl2_pages)}: "
-                          f"{len(page_data)}B to printer {host}:{port}")
+                          f"{len(fixed)}B to printer {host}:{port}")
             except Exception as e:
                 log.error(f"Failed to send page {i+1} to printer: {e}")
                 return False
+
+            # Delay between pages to avoid overwhelming the printer
+            if i < len(hbpl2_pages) - 1:
+                time.sleep(2)
 
         log.info(f"All {len(hbpl2_pages)} pages sent: "
                   f"{total_sent}B total to printer {host}:{port}")
@@ -769,8 +768,18 @@ def handle_client(conn, addr, printer_host, printer_port):
         copies     = int(meta_options.get('n', '1'))
         duplex     = int(meta_options.get('d', '1'))
         source     = int(meta_options.get('source', '7'))
+
+        # Paper geometry table is defined at 600 DPI.  If CUPS sends
+        # a different resolution (e.g., 360x360 from some apps), the
+        # geometry would be wrong — 4960x7016 at 360 DPI = 13.78"x19.49"
+        # instead of A4 (8.27"x11.69").  Always force 600x600.
+        if resolution != DEFAULT_RESOLUTION:
+            log.info(f"Override resolution: {resolution} -> {DEFAULT_RESOLUTION} "
+                     f"(paper geometry is at 600 DPI)")
+            resolution = DEFAULT_RESOLUTION
+
         log.info(f"Options from CUPS: paper={paper}, res={resolution}, "
-                  f"copies={copies}, duplex={duplex}, source={source}")
+                 f"copies={copies}, duplex={duplex}, source={source}")
     else:
         log.info("No APEOS_META header, using defaults")
 
